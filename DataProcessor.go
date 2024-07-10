@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 )
 
 type Result struct {
@@ -21,10 +22,26 @@ type Input struct {
 	Val2 int
 }
 
+type MissingInputError struct {
+	Message string
+}
+
+func (mie MissingInputError) Error() string {
+	return mie.Message
+}
+
+func (mie MissingInputError) Is(target error) bool {
+	_, ok := target.(MissingInputError)
+	return ok
+}
+
 func parser(data []byte) (Input, error) {
 	// parse the data
 	lines := bytes.Split(data, []byte("\n"))
 	// each entry is line 1 id, line 2 operator, line 3 num 1, line 4 num2
+	if len(lines) < 4 {
+		return Input{}, MissingInputError{fmt.Sprintf("parser needs 4 inputs. %d provided", len(lines))}
+	}
 	id := string(lines[0])
 	op := string(lines[1])
 	val1, err := strconv.Atoi(string(lines[2]))
@@ -58,6 +75,10 @@ func DataProcessor(in <-chan []byte, out chan<- Result) {
 		case "*":
 			calc = input.Val1 * input.Val2
 		case "/":
+			if input.Val2 == 0 {
+				continue
+			}
+
 			calc = input.Val1 / input.Val2
 		default:
 			continue
@@ -73,11 +94,13 @@ func DataProcessor(in <-chan []byte, out chan<- Result) {
 	close(out)
 }
 
-func WriteData(in <-chan Result, w io.Writer) {
+func WriteData(in <-chan Result, w io.Writer, l *sync.Mutex) {
 	for r := range in {
 		// write the output data to writer
 		// each line is id:result
+		l.Lock()
 		w.Write([]byte(fmt.Sprintf("%s:%d\n", r.Id, r.Value)))
+		l.Unlock()
 	}
 }
 
@@ -111,6 +134,7 @@ func NewController(out chan []byte) http.Handler {
 }
 
 func main() {
+	var l sync.Mutex
 	// set everything up
 	ch1 := make(chan []byte, 100)
 	ch2 := make(chan Result, 100)
@@ -120,7 +144,7 @@ func main() {
 		panic(err)
 	}
 	defer f.Close()
-	go WriteData(ch2, f)
+	go WriteData(ch2, f, &l)
 	err = http.ListenAndServe(":8080", NewController(ch1))
 	if err != nil {
 		fmt.Println(err)
